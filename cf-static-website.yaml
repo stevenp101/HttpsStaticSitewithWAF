@@ -1,0 +1,160 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: "Static site with S3 + CloudFront behind WAF (with IP restrictions) and auto-named S3 bucket"
+
+Parameters:
+  HostedZoneId:
+    Type: String
+    Description: "ID of your Route 53 Hosted Zone (e.g., Z1234567890XYZ)"
+  HostedZoneName:
+    Type: String
+    Description: "e.g., example.com."
+  SiteSubDomain:
+    Type: String
+    Default: www
+    Description: "Subdomain to use, e.g., www"
+
+Resources:
+
+  SiteCertificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Sub "${SiteSubDomain}.${HostedZoneName}"
+      ValidationMethod: DNS
+      DomainValidationOptions:
+        - DomainName: !Sub "${SiteSubDomain}.${HostedZoneName}"
+          HostedZoneId: !Ref HostedZoneId
+
+  WebsiteBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      WebsiteConfiguration:
+        IndexDocument: index.html
+
+  BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref WebsiteBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCloudFrontAccess
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub "${WebsiteBucket.Arn}/*"
+            Condition:
+              StringEquals:
+                AWS:SourceArn:
+                  Fn::Sub:
+                    - "arn:aws:cloudfront::${AWS::AccountId}:distribution/${DistId}"
+                    - DistId: !GetAtt CloudFrontDistribution.Id
+
+  OAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: CloudFrontOAC
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+        Description: OAC for secure S3 access
+
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Aliases:
+          - !Sub "${SiteSubDomain}.${HostedZoneName}"
+        DefaultRootObject: index.html
+        Origins:
+          - Id: S3Origin
+            DomainName: !Sub "${WebsiteBucket}.s3.amazonaws.com"
+            S3OriginConfig: {}
+            OriginAccessControlId: !GetAtt OAC.Id
+        DefaultCacheBehavior:
+          TargetOriginId: S3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD]
+          CachedMethods: [GET, HEAD]
+          ForwardedValues:
+            QueryString: false
+            Cookies:
+              Forward: none
+          Compress: true
+        ViewerCertificate:
+          AcmCertificateArn: !Ref SiteCertificate
+          SslSupportMethod: sni-only
+          MinimumProtocolVersion: TLSv1.2_2021
+        PriceClass: PriceClass_100
+        WebACLId: !GetAtt WebACL.Arn
+
+  DNSRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Sub "${SiteSubDomain}.${HostedZoneName}"
+      Type: A
+      AliasTarget:
+        HostedZoneId: Z2FDTNDATAQYW2
+        DNSName: !GetAtt CloudFrontDistribution.DomainName
+        EvaluateTargetHealth: false
+
+  TrustedIPSet:
+    Type: AWS::WAFv2::IPSet
+    Properties:
+      Name: TrustedIPRanges
+      Scope: CLOUDFRONT
+      IPAddressVersion: IPV4
+      Addresses:
+        - 128.229.4.0/24
+        - 128.229.67.0/24
+        - 156.80.4.0/24
+
+  WebACL:
+    Type: AWS::WAFv2::WebACL
+    DependsOn: TrustedIPSet
+    Properties:
+      Name: StaticSiteWAF
+      Scope: CLOUDFRONT
+      DefaultAction:
+        Block: {}
+      VisibilityConfig:
+        SampledRequestsEnabled: true
+        CloudWatchMetricsEnabled: true
+        MetricName: waf
+      Rules:
+        - Name: AllowFromTrustedIPs
+          Priority: 0
+          Action:
+            Allow: {}
+          Statement:
+            IPSetReferenceStatement:
+              Arn: !GetAtt TrustedIPSet.Arn
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AllowFromTrustedIPs
+        - Name: AWS-AWSManagedRulesCommonRuleSet
+          Priority: 1
+          Statement:
+            ManagedRuleGroupStatement:
+              Name: AWSManagedRulesCommonRuleSet
+              VendorName: AWS
+          OverrideAction:
+            None: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: CommonRuleSet
+
+Outputs:
+  WebsiteURL:
+    Value: !Sub "https://${SiteSubDomain}.${HostedZoneName}"
+    Description: "Access the static Hello World site"
