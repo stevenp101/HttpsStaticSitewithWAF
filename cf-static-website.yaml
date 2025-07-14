@@ -113,9 +113,7 @@ Resources:
       Scope: CLOUDFRONT
       IPAddressVersion: IPV4
       Addresses:
-        - 128.229.4.0/24
-        - 128.229.67.0/24
-        - 156.80.4.0/24
+        - 123.245.67.0/24
 
   WebACL:
     Type: AWS::WAFv2::WebACL
